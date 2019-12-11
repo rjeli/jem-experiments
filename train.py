@@ -9,6 +9,8 @@ from docopt import docopt
 import random
 import collections
 
+import numpy as np
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -16,6 +18,7 @@ from torchvision.models.resnet import BasicBlock, conv1x1
 from torchvision.datasets import CIFAR10
 import torchvision.transforms as tfm
 from torch.utils.data import DataLoader
+import visdom
 
 img_norm = tfm.Normalize((.5,.5,.5),(.5,.5,.5))
 img_tfm = tfm.Compose([tfm.ToTensor(), img_norm])
@@ -42,7 +45,7 @@ class Resnet(nn.Module):
             if self.in_planes != planes or s != 1:
                 downsample = conv1x1(
                     self.in_planes, planes*BasicBlock.expansion, stride=s)
-            layers.append(BasicBlock(self.in_planes, planes, 
+            layers.append(BasicBlock(self.in_planes, planes,
                 stride=s, downsample=downsample, norm_layer=nn.Identity))
             self.in_planes = planes * BasicBlock.expansion
         return nn.Sequential(*layers)
@@ -54,10 +57,48 @@ class Resnet(nn.Module):
         x = self.linear(x)
         return x
 
+class VisStats:
+    def __init__(self):
+        self.vis = visdom.Visdom()
+        self.stats = collections.defaultdict(lambda: [])
+        self.running = collections.defaultdict(lambda: [])
+    def add(self, name, val):
+        self.running[name].append(val)
+    def update(self):
+        for k in sorted(self.running.keys()):
+            avg = np.mean(self.running[k])
+            del self.running[k]
+            print(f'{k}: {avg}')
+            self.stats[k].append(avg)
+            self.vis.line(self.stats[k], np.arange(len(self.stats[k])),
+                win=k, opts=dict(title=k))
+
+class CalibErrTracker:
+    def __init__(self):
+        self.conf_counts = [0] * 20
+        self.conf_corrects = [0] * 20
+    def update(self, y_hat):
+        confs = F.softmax(y_hat, dim=1)
+        for batch_i in range(confs.size()[0]):
+            _, pred_cls = confs[batch_i].max(dim=0)
+            for cls_i in range(confs.size()[1]):
+                conf = confs[batch_i, cls_i].clamp(min=0,max=.99)
+                bucket = int(conf * 20)
+                self.conf_counts[bucket] += 1
+                if cls_i == pred_cls and cls_i == y[batch_i]:
+                    self.conf_corrects[bucket] += 1
+    def err(self):
+        calib_err = 0.
+        for i in range(20):
+            if self.conf_counts[i]:
+                model_density = self.conf_corrects[i] / self.conf_counts[i]
+                calib_err += abs(i/20 - model_density)
+        return calib_err
+
 class JEM:
     def __init__(self, model):
         self.model = model
-        self.replay_buffer = collections.deque(maxlen=10000)
+        self.replay_buffer = collections.deque(maxlen=1000)
     def energy_at(self, x):
         #return -self.model(x).clamp(max=10).exp().sum(dim=1).clamp(min=1e-4).log()
         return -torch.logsumexp(self.model(x), dim=1)
@@ -65,6 +106,7 @@ class JEM:
         if self.replay_buffer and torch.rand(1) < .95:
             x = random.choice(self.replay_buffer)
         else:
+            print('new x')
             x = torch.rand(3, 32, 32).cuda() * 2 - 1
         for _ in range(20):
             x.requires_grad_(True)
@@ -78,12 +120,12 @@ class JEM:
         return x
     def gen_loss(self, x):
         sampled_x = self.draw_sample()
-        # ?
-        # return F.mse_loss(self.energy_at(x), self.energy_at(sampled_x[None]))
         return self.energy_at(x) - self.energy_at(sampled_x[None])
+        # return -(self.energy_at(x) - self.energy_at(sampled_x[None]))
 
 if __name__ == '__main__':
     args = docopt(__doc__)
+    vis = VisStats()
 
     print('loading resnet')
     model = Resnet().cuda()
@@ -95,7 +137,6 @@ if __name__ == '__main__':
 
     bs = int(args['--bs'] or 32)
     if args['--jem']:
-        jem = JEM(model)
         bs = 1
 
     tds = CIFAR10('~/cifar', train=True, download=True, transform=img_tfm)
@@ -107,66 +148,67 @@ if __name__ == '__main__':
     print('len(tds):', len(tds))
     print('len(vds):', len(tds))
 
-    tdl = DataLoader(tds, 
+    tdl = DataLoader(tds,
         shuffle=True, batch_size=bs, num_workers=8, pin_memory=True)
-    vdl = DataLoader(vds, 
+    vdl = DataLoader(vds,
         shuffle=False, batch_size=bs, num_workers=8, pin_memory=True)
 
-    opt = torch.optim.AdamW(model.parameters(), 
+    opt = torch.optim.AdamW(model.parameters(),
         # no batchnorm, so make sure we weight_decay
-        lr=1e-3, weight_decay=1e-2)
+        lr=1e-4, weight_decay=1e-1)
+
+    jem = JEM(model)
+
+    clf_losses = []
+    gen_losses = []
 
     for epoch in range(int(args['--epochs'])):
         print('epoch', epoch)
         model.train()
-        train_loss = 0.
+        train_energies = []
+        cet = CalibErrTracker()
         for img, y in tqdm(tdl):
             img, y = img.cuda(), y.cuda()
             y_hat = model(img)
-            loss = F.cross_entropy(y_hat, y)
+            cet.update(y_hat.cpu())
+            train_energies.append(jem.energy_at(img).mean().item())
+            clf_loss = F.cross_entropy(y_hat, y)
+            vis.add('train_clf_loss', clf_loss.item())
+            acc = (y_hat.max(dim=1)[1] == y).cpu().float().mean()
+            vis.add('train_accuracy', acc.item())
+            loss = clf_loss
             if args['--jem']:
                 gen_loss = jem.gen_loss(img)
-                print('clf_loss:', loss.item())
                 print('gen_loss:', gen_loss.item())
-                loss += gen_loss.mean()
+                vis.add('train_gen_loss', gen_loss.item())
+                loss += .5 * gen_loss.mean()
             opt.zero_grad()
             loss.backward()
             opt.step()
-            train_loss += loss.item()
-        print('train loss:', train_loss/len(tdl))
+        vis.add('train_calib_err', cet.err())
         model.eval()
-        val_loss = 0.
-        n_correct = 0
-        conf_counts = [0] * 20
-        conf_corrects = [0] * 20
+        val_energies = []
+        cet = CalibErrTracker()
         with torch.no_grad():
             for img, y in tqdm(vdl):
-                y_hat = model(img.cuda())
-                loss = F.cross_entropy(y_hat, y.cuda())
-                val_loss += loss.item()
-                n_correct += torch.sum(y_hat.cpu().max(dim=1)[1] == y).item()
-                confs = F.softmax(y_hat, dim=1)
-                for batch_i in range(confs.size()[0]):
-                    _, pred_cls = confs[batch_i].max(dim=0)
-                    for cls_i in range(confs.size()[1]):
-                        conf = confs[batch_i, cls_i].clamp(min=0,max=.99)
-                        bucket = int(conf * 20)
-                        conf_counts[bucket] += 1
-                        if cls_i == pred_cls and cls_i == y[batch_i]:
-                            conf_corrects[bucket] += 1
-        print('val loss:', val_loss/len(vds))
-        print('val accuracy:', n_correct/len(vds))
-        calib_err = 0.
-        for i in range(20):
-            if conf_counts[i]:
-                model_density = conf_corrects[i] / conf_counts[i]
-                calib_err += abs(i/20 - model_density)
-            else:
-                model_density = 0
-            print(f'bucket {round(i/20,2)}: {round(model_density,2)}')
-        print('val calib err:', calib_err)
+                img, y = img.cuda(), y.cuda()
+                y_hat = model(img)
+                cet.update(y_hat.cpu())
+                val_energies.append(jem.energy_at(img).mean().item())
+                clf_loss = F.cross_entropy(y_hat, y)
+                vis.add('val_clf_loss', clf_loss.item())
+                loss = clf_loss
+                acc = (y_hat.max(dim=1)[1] == y).cpu().float().mean()
+                vis.add('val_accuracy', acc.item())
+        vis.add('val_calib_err', cet.err())
+        train_energy = np.mean(train_energies)
+        val_energy = np.mean(val_energies)
+        rand_img = torch.randn(64, 3, 224, 224).cuda() * 2 - 1
+        rand_energy = jem.energy_at(rand_img).mean().item()
+        vis.add('log(train_x_prob/rand_x_prob)', rand_energy-train_energy)
+        vis.add('log(val_x_prob/rand_x_prob)', rand_energy-val_energy)
+        vis.update()
 
     print('saving to', args['--save-to'])
     torch.save(model.state_dict(), args['--save-to'])
     print('done')
-
