@@ -10,3 +10,7 @@ Currently (Wednesday 12/11) I have only trained a small resnet to 50% accuracy o
 ![](samples/plane0.png | width=128) ![](samples/plane1.png)
 
 <img src="samples/plane0.png" width=128>
+
+Class | Samples |
+--- | ---
+Plane | <img src="samples/plane0.png" width=128>
