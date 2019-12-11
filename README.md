@@ -6,14 +6,9 @@ The code is hacked together and there are certainly more than a few bugs. I expe
 
 Currently (Wednesday 12/11) I have only trained a small resnet to 50% accuracy on 10% of CIFAR10. Although training becomes very unstable towards the end, the generated samples are promising.
 
-## Plane
-![](samples/plane0.png | width=128) ![](samples/plane1.png)
-
-<img src="samples/plane0.png" width=128>
-
 Class | Samples |
 --- | ---
-Plane | <img src="samples/plane0.png" width=128> <img src="samples/plane1.png" width=128>
+Plane | <img src="samples/plane0.png" width=128> <img src="samples/plane1.png" width=128> <img src="samples/plane2.png" width=128>
 Car | <img src="samples/car0.png" width=128> <img src="samples/car1.png" width=128> <img src="samples/car2.png" width=128> <img src="samples/car3.png" width=128>
 Bird | <img src="samples/bird0.png" width=128>
 Cat | <img src="samples/cat0.png" width=128>
@@ -23,3 +18,11 @@ Frog | <img src="samples/frog0.png" width=128>
 Horse | <img src="samples/horse0.png" width=128>
 Ship | <img src="samples/ship0.png" width=128>
 Truck | <img src="samples/truck0.png" width=128>
+
+Next steps, roughly in order:
+ - Make the restart code more sophisticated so I can train longer without babysitting it so much. Currently it diverges a LOT and the auto restart only works maybe 50% of the time.
+ - Train on all of CIFAR10 to convergence
+ - Make some pretty plots of inception scores (I know, they're considered harmful)
+ - Clean up the code so others can train and generate samples
+ - Try and figure out methods to stabilize training (SGLD & loss tuning)
+
