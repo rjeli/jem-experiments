@@ -6,8 +6,9 @@ Usage:
 
 from tqdm import tqdm
 from docopt import docopt
-import random
 import collections
+import contextlib
+import time
 
 import numpy as np
 
@@ -22,6 +23,13 @@ import visdom
 
 img_norm = tfm.Normalize((.5,.5,.5),(.5,.5,.5))
 img_tfm = tfm.Compose([tfm.ToTensor(), img_norm])
+
+@contextlib.contextmanager
+def timer(msg):
+    t0 = time.time()
+    yield
+    t1 = time.time()
+    print(f'ms to {msg}: {(t1-t0)*1000}')
 
 class Resnet(nn.Module):
     def __init__(self):
@@ -106,7 +114,8 @@ class JEM:
         xs = []
         for _ in range(num):
             if self.replay_buffer and torch.rand(1) < .95:
-                xs.append(random.choice(self.replay_buffer))
+                rand_idx = (torch.rand(1)*len(self.replay_buffer)).int().item()
+                xs.append(self.replay_buffer[rand_idx])
             else:
                 xs.append(torch.rand(3, 32, 32).cuda() * 2 - 1)
         xs = torch.stack(xs)
@@ -129,6 +138,7 @@ class JEM:
 if __name__ == '__main__':
     args = docopt(__doc__)
     vis = VisStats()
+    torch.manual_seed(0)
 
     print('loading resnet')
     model = Resnet().cuda()
@@ -173,7 +183,6 @@ if __name__ == '__main__':
         cet = CalibErrTracker()
         for img, y in tqdm(tdl):
             img, y = img.cuda(non_blocking=True), y.cuda(non_blocking=True)
-            # img, y = img.cuda(), y.cuda()
             y_hat = model(img)
             cet.update(y_hat.cpu())
             train_energies.append(jem.energy_at(img).mean().item())
@@ -183,13 +192,10 @@ if __name__ == '__main__':
             vis.add('train_accuracy', acc.item())
             loss = clf_loss
             if args['--jem']:
-                import time
                 torch.cuda.synchronize()
-                t0 = time.time()
-                gen_loss = jem.gen_loss(img)
-                torch.cuda.synchronize()
-                t1 = time.time()
-                print('ms to gen_loss:', (t1-t0)*1000)
+                with timer('gen_loss'):
+                    gen_loss = jem.gen_loss(img)
+                    torch.cuda.synchronize()
                 print('gen_loss:', gen_loss.item())
                 vis.add('train_gen_loss', gen_loss.item())
                 loss += .5 * gen_loss.mean()
