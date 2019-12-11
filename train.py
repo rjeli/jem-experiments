@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Usage:
-    ./train.py --epochs=<n> [--samples=<n>] [--bs=<n>] --save-to=<path> [--jem]
+    ./train.py --epochs=<n> [--samples=<n>] [--bs=<n>] --save-to=<path> [--jem] [--resume=<path>] [--seed=<n>] [--lr=<lr>]
 """
 
 from tqdm import tqdm
@@ -9,6 +9,8 @@ from docopt import docopt
 import collections
 import contextlib
 import time
+from pathlib import Path
+import random
 
 import numpy as np
 
@@ -80,6 +82,8 @@ class VisStats:
             self.stats[k].append(avg)
             self.vis.line(self.stats[k], np.arange(len(self.stats[k])),
                 win=k, opts=dict(title=k))
+    def reset(self):
+        self.running.clear()
 
 class CalibErrTracker:
     def __init__(self):
@@ -106,7 +110,9 @@ class CalibErrTracker:
 class JEM:
     def __init__(self, model):
         self.model = model
-        self.replay_buffer = collections.deque(maxlen=1000)
+        self.replay_buffer = collections.deque(maxlen=10000)
+    def reset(self):
+        self.replay_buffer.clear()
     def energy_at(self, x):
         return -torch.logsumexp(self.model(x), dim=1)
     def draw_samples(self, num=1):
@@ -118,7 +124,9 @@ class JEM:
             else:
                 xs.append(torch.rand(3, 32, 32).cuda() * 2 - 1)
         xs = torch.stack(xs)
-        for _ in range(20):
+        # if replay buffer is cold, run more steps
+        num_steps = 80 if not self.replay_buffer else 20
+        for _ in range(num_steps):
             xs.requires_grad_(True)
             energy = self.energy_at(xs)
             energy.sum().backward()
@@ -132,12 +140,24 @@ class JEM:
         return xs
     def gen_loss(self, x):
         sampled_xs = self.draw_samples(num=x.shape[0])
-        return (self.energy_at(x) - self.energy_at(sampled_xs)).mean()
+        sampled_energies = self.energy_at(sampled_xs)
+        # sometimes energy is huge, just ignore it?
+        # (the paper said this wouldn't work)
+        if False:
+            mask = sampled_energies < 0
+            return (self.energy_at(x) - sampled_energies)[mask].mean()
+        return (self.energy_at(x) - sampled_energies).mean()
 
 if __name__ == '__main__':
     args = docopt(__doc__)
     vis = VisStats()
-    torch.manual_seed(0)
+    if args['--seed']:
+        torch.manual_seed(int(args['--seed']))
+    else:
+        torch.manual_seed(0)
+    save_dir = Path(args['--save-to'])
+    if not save_dir.exists():
+        save_dir.mkdir()
 
     print('loading resnet')
     model = Resnet().cuda()
@@ -166,25 +186,60 @@ if __name__ == '__main__':
     vdl = DataLoader(vds,
         shuffle=False, batch_size=bs, num_workers=0, pin_memory=True)
 
+    lr = float(args['--lr'] or 1e-3)
     opt = torch.optim.AdamW(model.parameters(),
         # no batchnorm, so make sure we weight_decay
-        lr=1e-3, weight_decay=1e-1)
+        lr=lr, weight_decay=1e-1)
+
+    if args['--resume']:
+        print('resuming from', args['--resume'])
+        ckpt = torch.load(args['--resume'])
+        model.load_state_dict(ckpt['model'])
+        opt.load_state_dict(ckpt['opt'])
 
     jem = JEM(model)
 
     clf_losses = []
     gen_losses = []
 
-    for epoch in range(int(args['--epochs'])):
+    epoch = 0
+    num_restarts = 0
+    # for epoch in range(int(args['--epochs'])):
+    while epoch < int(args['--epochs']):
         print('epoch', epoch)
         model.train()
         train_energies = []
         cet = CalibErrTracker()
+        restarting = False
         for img, y in tqdm(tdl):
             img, y = img.cuda(non_blocking=True), y.cuda(non_blocking=True)
             y_hat = model(img)
             cet.update(y_hat.cpu())
             train_energies.append(jem.energy_at(img).mean().item())
+            if train_energies[-1] > 1e3:
+                print('=== DETECTED DIVERGENCE, reseeding and restarting ===')
+                vis.reset()
+                jem.reset()
+                if epoch > 0:
+                    load_path = save_dir / f'{epoch-1}.pt'
+                else:
+                    assert args['--resume']
+                    load_path = args['--resume']
+                ckpt = torch.load(str(load_path))
+                model.load_state_dict(ckpt['model'])
+                opt.load_state_dict(ckpt['opt'])
+                torch.manual_seed(random.randint(0, 123456))
+                num_restarts += 1
+                if num_restarts > 10:
+                    print('=== TOO MANY RESTARTS, lowering lr ===')
+                    current_lr = opt.param_groups[0]['lr']
+                    new_lr = current_lr / 10
+                    print(f'{current_lr} -> {new_lr}')
+                    for p in opt.param_groups:
+                        p['lr'] = new_lr
+                    num_restarts = 0
+                restarting = True
+                break
             clf_loss = F.cross_entropy(y_hat, y)
             vis.add('train_clf_loss', clf_loss.item())
             acc = (y_hat.max(dim=1)[1] == y).cpu().float().mean()
@@ -198,9 +253,16 @@ if __name__ == '__main__':
                 print('gen_loss:', gen_loss.item())
                 vis.add('train_gen_loss', gen_loss.item())
                 loss += 1 * gen_loss.mean()
+                # print('energies:', jem.energy_at(img).detach().cpu().tolist())
             opt.zero_grad()
             loss.backward()
+            total_norm = 0
+            for p in model.parameters():
+                total_norm += (p.grad.data**2).sum().item()
+            vis.add('grad_norm', total_norm)
             opt.step()
+        if restarting:
+            continue
         vis.add('train_calib_err', cet.err())
         model.eval()
         val_energies = []
@@ -223,14 +285,21 @@ if __name__ == '__main__':
         rand_energy = jem.energy_at(rand_img).mean().item()
         vis.add('log(train_x_prob/rand_x_prob)', rand_energy-train_energy)
         vis.add('log(val_x_prob/rand_x_prob)', rand_energy-val_energy)
+
         vis.update()
 
         if vis.stats['train_clf_loss'][-1] > 10:
             print('diverged, bailing out!')
             import sys; sys.exit()
 
-        print('saving to', args['--save-to'])
-        torch.save(model.state_dict(), args['--save-to'])
+        save_path = save_dir / f'{epoch}.pt'
+        print('saving to', save_path)
+        torch.save({
+            'model': model.state_dict(),
+            'opt': opt.state_dict(),
+        }, str(save_path))
         print('done')
+
+        epoch += 1
 
     print('done all')
