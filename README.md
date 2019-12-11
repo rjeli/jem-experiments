@@ -13,4 +13,13 @@ Currently (Wednesday 12/11) I have only trained a small resnet to 50% accuracy o
 
 Class | Samples |
 --- | ---
-Plane | <img src="samples/plane0.png" width=128>
+Plane | <img src="samples/plane0.png" width=128> <img src="samples/plane1.png" width=128>
+Car | <img src="samples/car0.png" width=128> <img src="samples/car1.png" width=128> <img src="samples/car2.png" width=128> <img src="samples/car3.png" width=128>
+Bird | <img src="samples/bird0.png" width=128>
+Cat | <img src="samples/cat0.png" width=128>
+Deer | <img src="samples/deer0.png" width=128>
+Dog | <img src="samples/dog0.png" width=128>
+Frog | <img src="samples/frog0.png" width=128>
+Horse | <img src="samples/horse0.png" width=128>
+Ship | <img src="samples/ship0.png" width=128>
+Truck | <img src="samples/truck0.png" width=128>
