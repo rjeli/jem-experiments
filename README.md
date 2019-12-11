@@ -7,4 +7,4 @@ The code is hacked together and there are certainly more than a few bugs. I expe
 Currently (Wednesday 12/11) I have only trained a small resnet to 50% accuracy on 10% of CIFAR10. Although training becomes very unstable towards the end, the generated samples are promising.
 
 ## Plane
-![](samples/plane0.png) ![](samples/plane1.png)
+![](samples/plane0.png | width=128) ![](samples/plane1.png)
