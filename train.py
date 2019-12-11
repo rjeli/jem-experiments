@@ -52,8 +52,8 @@ class Resnet(nn.Module):
     def forward(self, x):
         x = self.stem(x)
         x = self.layers(x)
-        x = F.avg_pool2d(x, x.size()[3])
-        x = x.view(x.size()[0], -1)
+        x = F.avg_pool2d(x, x.shape[3])
+        x = x.view(x.shape[0], -1)
         x = self.linear(x)
         return x
 
@@ -102,26 +102,29 @@ class JEM:
     def energy_at(self, x):
         #return -self.model(x).clamp(max=10).exp().sum(dim=1).clamp(min=1e-4).log()
         return -torch.logsumexp(self.model(x), dim=1)
-    def draw_sample(self):
-        if self.replay_buffer and torch.rand(1) < .95:
-            x = random.choice(self.replay_buffer)
-        else:
-            print('new x')
-            x = torch.rand(3, 32, 32).cuda() * 2 - 1
+    def draw_samples(self, num=1):
+        xs = []
+        for _ in range(num):
+            if self.replay_buffer and torch.rand(1) < .95:
+                xs.append(random.choice(self.replay_buffer))
+            else:
+                xs.append(torch.rand(3, 32, 32).cuda() * 2 - 1)
+        xs = torch.stack(xs)
         for _ in range(20):
-            x.requires_grad_(True)
-            energy = self.energy_at(x[None])[0]
-            energy.backward()
-            x_grad = x.grad.clone()
-            x.requires_grad_(False)
-            x = x - x_grad + .01 * torch.randn_like(x)
-        self.replay_buffer.append(x)
-        print(f'got sample with energy {energy.item()}')
-        return x
+            xs.requires_grad_(True)
+            energy = self.energy_at(xs)
+            energy.sum().backward()
+            x_grad = xs.grad.clone()
+            xs.requires_grad_(False)
+            xs = xs - x_grad + .01 * torch.randn_like(xs)
+        for x in xs:
+            self.replay_buffer.append(x.clone())
+        energies = energy.detach().cpu().numpy().tolist()
+        print(f'got samples with energies {[round(e, 2) for e in energies]}')
+        return xs
     def gen_loss(self, x):
-        sampled_x = self.draw_sample()
-        return self.energy_at(x) - self.energy_at(sampled_x[None])
-        # return -(self.energy_at(x) - self.energy_at(sampled_x[None]))
+        sampled_xs = self.draw_samples(num=x.shape[0])
+        return (self.energy_at(x) - self.energy_at(sampled_xs)).mean()
 
 if __name__ == '__main__':
     args = docopt(__doc__)
@@ -137,7 +140,8 @@ if __name__ == '__main__':
 
     bs = int(args['--bs'] or 32)
     if args['--jem']:
-        bs = 1
+        # bs = 1
+        pass
 
     tds = CIFAR10('~/cifar', train=True, download=True, transform=img_tfm)
     vds = CIFAR10('~/cifar', train=False, download=True, transform=img_tfm)
@@ -149,13 +153,13 @@ if __name__ == '__main__':
     print('len(vds):', len(tds))
 
     tdl = DataLoader(tds,
-        shuffle=True, batch_size=bs, num_workers=8, pin_memory=True)
+        shuffle=True, batch_size=bs, num_workers=0, pin_memory=True)
     vdl = DataLoader(vds,
-        shuffle=False, batch_size=bs, num_workers=8, pin_memory=True)
+        shuffle=False, batch_size=bs, num_workers=0, pin_memory=True)
 
     opt = torch.optim.AdamW(model.parameters(),
         # no batchnorm, so make sure we weight_decay
-        lr=1e-4, weight_decay=1e-1)
+        lr=1e-3, weight_decay=1e-1)
 
     jem = JEM(model)
 
@@ -168,7 +172,8 @@ if __name__ == '__main__':
         train_energies = []
         cet = CalibErrTracker()
         for img, y in tqdm(tdl):
-            img, y = img.cuda(), y.cuda()
+            img, y = img.cuda(non_blocking=True), y.cuda(non_blocking=True)
+            # img, y = img.cuda(), y.cuda()
             y_hat = model(img)
             cet.update(y_hat.cpu())
             train_energies.append(jem.energy_at(img).mean().item())
@@ -178,7 +183,13 @@ if __name__ == '__main__':
             vis.add('train_accuracy', acc.item())
             loss = clf_loss
             if args['--jem']:
+                import time
+                torch.cuda.synchronize()
+                t0 = time.time()
                 gen_loss = jem.gen_loss(img)
+                torch.cuda.synchronize()
+                t1 = time.time()
+                print('ms to gen_loss:', (t1-t0)*1000)
                 print('gen_loss:', gen_loss.item())
                 vis.add('train_gen_loss', gen_loss.item())
                 loss += .5 * gen_loss.mean()
