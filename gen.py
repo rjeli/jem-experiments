@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Usage:
-    ./fgsm.py <model> <class> <iters> [--energy=<coeff>]
+    ./gen.py <model> <class> <stop>
 """
 
 from docopt import docopt
@@ -21,40 +21,37 @@ if __name__ == '__main__':
     model.load_state_dict(torch.load(args['<model>'])['model'])
     model.train()
     x = torch.randn(1, 3, 32, 32, requires_grad=True, device='cuda')
-    opt = torch.optim.SGD([x], lr=1e-1, weight_decay=0)
+    opt = torch.optim.SGD([x], lr=1e-1, weight_decay=1e-5)
     class_idx = classes.index(args['<class>'])
     y = torch.tensor([class_idx]).cuda()
-    # for i in range(int(args['<iters>'])):
+    i = 0
     while True:
-        # print('iter', i)
+        print('iter', i)
+        i += 1
         y_hat = model(x)
-        loss = F.cross_entropy(y_hat, y)
-        print('clf_loss:', loss.item(),
-            'y_hat:', [round(p, 2) for p in y_hat[0].cpu().tolist()])
-        if args['--energy']:
-            energy = -torch.logsumexp(y_hat, dim=1).mean()
-            print('energy:', energy.item())
-            loss += energy * float(args['--energy'])
-            print('final loss:', loss.item())
-        if loss.item() < -30:
+        print('y_hat:', [round(p, 2) for p in y_hat[0].cpu().tolist()])
+        energy = -torch.logsumexp(y_hat, dim=1).mean()
+        print('energy:', energy.item())
+        clf_loss = F.cross_entropy(y_hat, y)
+        print('clf_loss:', clf_loss.item())
+        loss = -y_hat[0,class_idx]
+        print('loss:', loss.item())
+        if loss.item() < -int(args['<stop>']):
             print('done!')
             break
+
         model.zero_grad()
         opt.zero_grad()
         x.retain_grad()
         loss.backward()
         opt.step()
 
-        # sign = torch.sign(x.grad.data)
-        # perturbed = x.detach() - 0.01 * sign
-        # x = torch.clamp(perturbed, min=-1, max=1)
-
         print('x norm:', (x**2).sum().item())
         print('grad norm:', (x.grad.data**2).sum().item())
-
-        # x -= 1e-3 * x.grad.data
-        # x.grad.zero_()
-        # x.requires_grad_(True)
+        print('x:', x.min().item(), x.max().item(), x.std().item())
+        
+        with torch.no_grad():
+            x.clamp_(min=-1, max=1)
 
     x_im = TF.to_pil_image(x[0].cpu()*.5+.5)
-    x_im.save('fgsm.png')
+    x_im.save('sample.png')

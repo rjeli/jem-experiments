@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Usage:
-    ./train.py --epochs=<n> [--samples=<n>] [--bs=<n>] --save-to=<path> [--jem] [--resume=<path>] [--seed=<n>] [--lr=<lr>]
+    ./train.py --epochs=<n> [--samples=<n>] [--bs=<n>] --save-to=<path> [--jem] [--resume=<path>] [--seed=<n>] [--lr=<lr>] [--sgld-steps=<n>]
 """
 
 from tqdm import tqdm
@@ -108,9 +108,10 @@ class CalibErrTracker:
         return calib_err
 
 class JEM:
-    def __init__(self, model):
+    def __init__(self, model, steps=20):
         self.model = model
         self.replay_buffer = collections.deque(maxlen=10000)
+        self.steps = steps
     def reset(self):
         self.replay_buffer.clear()
     def energy_at(self, x):
@@ -125,10 +126,11 @@ class JEM:
                 xs.append(torch.rand(3, 32, 32).cuda() * 2 - 1)
         xs = torch.stack(xs)
         # if replay buffer is cold, run more steps
-        num_steps = 80 if not self.replay_buffer else 20
+        num_steps = 80 if not self.replay_buffer else self.steps
         for _ in range(num_steps):
             xs.requires_grad_(True)
             energy = self.energy_at(xs)
+            self.model.zero_grad()
             energy.sum().backward()
             x_grad = xs.grad.clone()
             xs.requires_grad_(False)
@@ -197,13 +199,14 @@ if __name__ == '__main__':
         model.load_state_dict(ckpt['model'])
         opt.load_state_dict(ckpt['opt'])
 
-    jem = JEM(model)
+    jem = JEM(model, int(args['--sgld-steps'] or 20))
 
     clf_losses = []
     gen_losses = []
 
     epoch = 0
     num_restarts = 0
+    already_went_back_2 = False
     # for epoch in range(int(args['--epochs'])):
     while epoch < int(args['--epochs']):
         print('epoch', epoch)
@@ -218,26 +221,33 @@ if __name__ == '__main__':
             train_energies.append(jem.energy_at(img).mean().item())
             if train_energies[-1] > 1e3:
                 print('=== DETECTED DIVERGENCE, reseeding and restarting ===')
-                vis.reset()
-                jem.reset()
                 if epoch > 0:
                     load_path = save_dir / f'{epoch-1}.pt'
                 else:
-                    assert args['--resume']
                     load_path = args['--resume']
+                current_lr = opt.param_groups[0]['lr']
+                if num_restarts > 10:
+                    if not already_went_back_2:
+                        print('=== TOO MANY RESTARTS, going back 2 epochs ===')
+                        load_path = save_dir / f'{epoch-2}.pt'
+                        already_went_back_2 = True
+                    else:
+                        print('=== THAT DIDNT WORK, lowering lr ===')
+                        new_lr = current_lr / 10
+                        print(f'{current_lr} -> {new_lr}')
+                        already_went_back_2 = False
+                    num_restarts = 0
+                else:
+                    new_lr = current_lr
+                vis.reset()
+                jem.reset()
                 ckpt = torch.load(str(load_path))
                 model.load_state_dict(ckpt['model'])
                 opt.load_state_dict(ckpt['opt'])
+                for p in opt.param_groups:
+                    p['lr'] = new_lr
                 torch.manual_seed(random.randint(0, 123456))
                 num_restarts += 1
-                if num_restarts > 10:
-                    print('=== TOO MANY RESTARTS, lowering lr ===')
-                    current_lr = opt.param_groups[0]['lr']
-                    new_lr = current_lr / 10
-                    print(f'{current_lr} -> {new_lr}')
-                    for p in opt.param_groups:
-                        p['lr'] = new_lr
-                    num_restarts = 0
                 restarting = True
                 break
             clf_loss = F.cross_entropy(y_hat, y)
