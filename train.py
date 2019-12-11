@@ -108,7 +108,6 @@ class JEM:
         self.model = model
         self.replay_buffer = collections.deque(maxlen=1000)
     def energy_at(self, x):
-        #return -self.model(x).clamp(max=10).exp().sum(dim=1).clamp(min=1e-4).log()
         return -torch.logsumexp(self.model(x), dim=1)
     def draw_samples(self, num=1):
         xs = []
@@ -198,7 +197,7 @@ if __name__ == '__main__':
                     torch.cuda.synchronize()
                 print('gen_loss:', gen_loss.item())
                 vis.add('train_gen_loss', gen_loss.item())
-                loss += .5 * gen_loss.mean()
+                loss += 1 * gen_loss.mean()
             opt.zero_grad()
             loss.backward()
             opt.step()
@@ -226,6 +225,12 @@ if __name__ == '__main__':
         vis.add('log(val_x_prob/rand_x_prob)', rand_energy-val_energy)
         vis.update()
 
-    print('saving to', args['--save-to'])
-    torch.save(model.state_dict(), args['--save-to'])
-    print('done')
+        if vis.stats['train_clf_loss'][-1] > 10:
+            print('diverged, bailing out!')
+            import sys; sys.exit()
+
+        print('saving to', args['--save-to'])
+        torch.save(model.state_dict(), args['--save-to'])
+        print('done')
+
+    print('done all')
