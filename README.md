@@ -11,7 +11,7 @@ Generally I stopped the samples towards the right earlier so they are noiser and
 Class | Samples |
 --- | ---
 Plane | <img src="samples/plane0.png" width=128> <img src="samples/plane1.png" width=128> <img src="samples/plane2.png" width=128>
-Car | <img src="samples/car0.png" width=128> <img src="samples/car1.png" width=128> <img src="samples/car2.png" width=128> <img src="samples/car3.png" width=128>
+Car | <img src="samples/car0.png" width=128> <img src="samples/car1.png" width=128> <img src="samples/car2.png" width=128>
 Bird | <img src="samples/bird0.png" width=128> <img src="samples/bird1.png" width=128> <img src="samples/bird2.png" width=128> 
 Cat | <img src="samples/cat0.png" width=128> <img src="samples/cat1.png" width=128> <img src="samples/cat2.png" width=128>
 Deer | <img src="samples/deer0.png" width=128> <img src="samples/deer1.png" width=128> <img src="samples/deer2.png" width=128>
