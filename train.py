@@ -7,7 +7,6 @@ Usage:
 from tqdm import tqdm
 from docopt import docopt
 import collections
-import contextlib
 import time
 from pathlib import Path
 import random
@@ -26,12 +25,10 @@ import visdom
 img_norm = tfm.Normalize((.5,.5,.5),(.5,.5,.5))
 img_tfm = tfm.Compose([tfm.ToTensor(), img_norm])
 
-@contextlib.contextmanager
-def timer(msg):
-    t0 = time.time()
-    yield
-    t1 = time.time()
-    print(f'ms to {msg}: {(t1-t0)*1000}')
+NGPUS = torch.cuda.device_count()
+
+from sgld import SGLDSampler
+from utils import timer, energy_of_pred
 
 class Resnet(nn.Module):
     def __init__(self):
@@ -66,10 +63,12 @@ class Resnet(nn.Module):
         x = x.view(x.shape[0], -1)
         x = self.linear(x)
         return x
+    def energy(self, x):
+        return energy_of_pred(self.forward(x))
 
 class VisStats:
     def __init__(self):
-        self.vis = visdom.Visdom()
+        # self.vis = visdom.Visdom()
         self.stats = collections.defaultdict(lambda: [])
         self.running = collections.defaultdict(lambda: [])
     def add(self, name, val):
@@ -80,8 +79,8 @@ class VisStats:
             del self.running[k]
             print(f'{k}: {avg}')
             self.stats[k].append(avg)
-            self.vis.line(self.stats[k], np.arange(len(self.stats[k])),
-                win=k, opts=dict(title=k))
+            # self.vis.line(self.stats[k], np.arange(len(self.stats[k])),
+                # win=k, opts=dict(title=k))
     def reset(self):
         self.running.clear()
 
@@ -119,7 +118,7 @@ class JEM:
     def draw_samples(self, num=1):
         xs = []
         for _ in range(num):
-            if self.replay_buffer and torch.rand(1) < .95:
+            if False and self.replay_buffer and torch.rand(1) < .95:
                 rand_idx = (torch.rand(1)*len(self.replay_buffer)).int().item()
                 xs.append(self.replay_buffer[rand_idx])
             else:
@@ -127,6 +126,8 @@ class JEM:
         xs = torch.stack(xs)
         # if replay buffer is cold, run more steps
         num_steps = 80 if not self.replay_buffer else self.steps
+        energy_before = self.energy_at(xs).mean().item()
+        print('energy before:', energy_before)
         for _ in range(num_steps):
             xs.requires_grad_(True)
             energy = self.energy_at(xs)
@@ -135,6 +136,7 @@ class JEM:
             x_grad = xs.grad.clone()
             xs.requires_grad_(False)
             xs = xs - x_grad + .01 * torch.randn_like(xs)
+        print('energy after:', self.energy_at(xs).mean().item())
         for x in xs:
             self.replay_buffer.append(x.clone())
         energies = energy.detach().cpu().numpy().tolist()
@@ -151,12 +153,17 @@ class JEM:
         return (self.energy_at(x) - sampled_energies).mean()
 
 if __name__ == '__main__':
+    print('training!!')
     args = docopt(__doc__)
     vis = VisStats()
     if args['--seed']:
         torch.manual_seed(int(args['--seed']))
     else:
         torch.manual_seed(0)
+    torch.cuda.manual_seed_all(0)
+    for i in range(torch.cuda.device_count()):
+        torch.rand(i+1, device=i)
+
     save_dir = Path(args['--save-to'])
     if not save_dir.exists():
         save_dir.mkdir()
@@ -201,6 +208,8 @@ if __name__ == '__main__':
 
     jem = JEM(model, int(args['--sgld-steps'] or 20))
 
+    sgld = SGLDSampler()
+
     clf_losses = []
     gen_losses = []
 
@@ -218,7 +227,8 @@ if __name__ == '__main__':
             img, y = img.cuda(non_blocking=True), y.cuda(non_blocking=True)
             y_hat = model(img)
             cet.update(y_hat.cpu())
-            train_energies.append(jem.energy_at(img).mean().item())
+            # train_energies.append(jem.energy_at(img).mean().item())
+            train_energies.append(0)
             if train_energies[-1] > 1e3:
                 print('=== DETECTED DIVERGENCE, reseeding and restarting ===')
                 if epoch > 0:
@@ -240,7 +250,7 @@ if __name__ == '__main__':
                 else:
                     new_lr = current_lr
                 vis.reset()
-                jem.reset()
+                # jem.reset()
                 ckpt = torch.load(str(load_path))
                 model.load_state_dict(ckpt['model'])
                 opt.load_state_dict(ckpt['opt'])
@@ -255,6 +265,7 @@ if __name__ == '__main__':
             acc = (y_hat.max(dim=1)[1] == y).cpu().float().mean()
             vis.add('train_accuracy', acc.item())
             loss = clf_loss
+            """
             if args['--jem']:
                 torch.cuda.synchronize()
                 with timer('gen_loss'):
@@ -264,6 +275,13 @@ if __name__ == '__main__':
                 vis.add('train_gen_loss', gen_loss.item())
                 loss += 1 * gen_loss.mean()
                 # print('energies:', jem.energy_at(img).detach().cpu().tolist())
+            """
+            if args['--jem']:
+                gen_loss = model.energy(img).mean()
+                print('drawing sgld')
+                post_xs = sgld.draw(model, img.shape[0])
+                gen_loss -= model.energy(post_xs).mean()
+                loss += gen_loss
             opt.zero_grad()
             loss.backward()
             total_norm = 0

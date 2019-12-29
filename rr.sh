@@ -16,6 +16,7 @@ else
 fi
 
 SETUP_PYENV="PATH=\$HOME/.pyenv/bin:\$PATH; eval \"\$(pyenv init -)\""
-SETUP_REQS="cd repos/jem-experiments; pip install -r requirements.txt"
+# SETUP_REQS="cd repos/jem-experiments; pip install -r requirements.txt"
+SETUP_REQS="cd repos/jem-experiments"
 
-ssh $REMOTEHOST "$SETUP_PYENV; $SETUP_REQS; $CMD"
+ssh -t $REMOTEHOST "$SETUP_PYENV; $SETUP_REQS; $CMD"
